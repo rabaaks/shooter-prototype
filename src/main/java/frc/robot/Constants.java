@@ -7,6 +7,8 @@
 
 package frc.robot;
 
+import edu.wpi.first.math.geometry.Translation2d;
+import edu.wpi.first.math.geometry.Translation3d;
 import edu.wpi.first.wpilibj.RobotBase;
 
 /**
@@ -17,6 +19,11 @@ import edu.wpi.first.wpilibj.RobotBase;
 public final class Constants {
   public static final Mode simMode = Mode.SIM;
   public static final Mode currentMode = RobotBase.isReal() ? Mode.REAL : simMode;
+
+  public static final Translation3d targetTranslation = new Translation3d(5, 5, 5);
+  public static final Translation2d targetFieldTranslation =
+      new Translation2d(targetTranslation.getX(), targetTranslation.getY());
+  public static final double targetZ = targetTranslation.getZ();
 
   public static enum Mode {
     /** Running on a real robot. */
@@ -32,7 +39,6 @@ public final class Constants {
   public static enum RobotState {
     IDLE,
     INTAKE,
-    READY,
     PRESCORE,
     SCORE
   }

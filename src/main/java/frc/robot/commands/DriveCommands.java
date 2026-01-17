@@ -10,6 +10,9 @@ package frc.robot.commands;
 import static frc.robot.subsystems.drive.DriveConstants.maxSpeedMetersPerSec;
 
 import edu.wpi.first.math.MathUtil;
+import edu.wpi.first.math.controller.ProfiledPIDController;
+import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.trajectory.TrapezoidProfile;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj.drive.DifferentialDrive;
 import edu.wpi.first.wpilibj2.command.Command;
@@ -20,10 +23,16 @@ import java.text.NumberFormat;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.function.DoubleSupplier;
+import java.util.function.Supplier;
 
 public class DriveCommands {
   private static final double DEADBAND = 0.1;
   private static final double FF_RAMP_RATE = 0.1; // Volts/Sec
+
+  private static final double ANGLE_KP = 1.0;
+  private static final double ANGLE_KD = 0.1;
+  private static final double ANGLE_MAX_VELOCITY = 8.0;
+  private static final double ANGLE_MAX_ACCELERATION = 20.0;
 
   private DriveCommands() {}
 
@@ -47,6 +56,31 @@ public class DriveCommands {
               speeds.left * maxSpeedMetersPerSec, speeds.right * maxSpeedMetersPerSec);
         },
         drive);
+  }
+
+  public static Command driveAtAngle(
+      Drive drive, DoubleSupplier xSupplier, Supplier<Rotation2d> rotationSupplier) {
+    ProfiledPIDController angleController =
+        new ProfiledPIDController(
+            ANGLE_KP,
+            0.0,
+            ANGLE_KD,
+            new TrapezoidProfile.Constraints(ANGLE_MAX_VELOCITY, ANGLE_MAX_ACCELERATION));
+    angleController.enableContinuousInput(-Math.PI, Math.PI);
+
+    return Commands.run(
+      () -> {
+        double x = MathUtil.applyDeadband(xSupplier.getAsDouble(), DEADBAND);
+        double z = MathUtil.applyDeadband(angleController.calculate(drive.getRotation().getRadians(), rotationSupplier.get().getRadians()), DEADBAND);
+
+      // Calculate speeds
+        var speeds = DifferentialDrive.arcadeDriveIK(x, z, true);
+
+        // Apply output
+        drive.runClosedLoop(
+            speeds.left * maxSpeedMetersPerSec, speeds.right * maxSpeedMetersPerSec);
+      }, 
+      drive);
   }
 
   /** Measures the velocity feedforward constants for the drive. */

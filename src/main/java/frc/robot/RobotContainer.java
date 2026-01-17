@@ -8,8 +8,10 @@
 package frc.robot;
 
 import static frc.robot.Constants.*;
+import static frc.robot.subsystems.vision.VisionConstants.robotToCamera0;
 
 import com.pathplanner.lib.auto.AutoBuilder;
+import edu.wpi.first.math.geometry.Translation2d;
 import edu.wpi.first.wpilibj.GenericHID;
 import edu.wpi.first.wpilibj.XboxController;
 import edu.wpi.first.wpilibj2.command.Command;
@@ -24,10 +26,16 @@ import frc.robot.subsystems.drive.DriveIOSim;
 import frc.robot.subsystems.drive.DriveIOTalonSRX;
 import frc.robot.subsystems.drive.GyroIO;
 import frc.robot.subsystems.drive.GyroIOPigeon2;
-
+import frc.robot.subsystems.shooter.Shooter;
+import frc.robot.subsystems.shooter.ShooterIO;
+import frc.robot.subsystems.shooter.ShooterIOReal;
+import frc.robot.subsystems.shooter.ShooterIOSim;
+import frc.robot.subsystems.vision.Vision;
+import frc.robot.subsystems.vision.VisionIO;
+import frc.robot.subsystems.vision.VisionIOPhotonVision;
+import frc.robot.subsystems.vision.VisionIOPhotonVisionSim;
 import java.util.EnumMap;
 import java.util.Map;
-
 import org.littletonrobotics.junction.AutoLogOutput;
 import org.littletonrobotics.junction.networktables.LoggedDashboardChooser;
 
@@ -40,6 +48,8 @@ import org.littletonrobotics.junction.networktables.LoggedDashboardChooser;
 public class RobotContainer {
   // Subsystems
   private final Drive drive;
+  private final Shooter shooter;
+  private final Vision vision;
 
   // Controller
   private final CommandXboxController controller = new CommandXboxController(0);
@@ -50,10 +60,10 @@ public class RobotContainer {
   private Map<RobotState, Trigger> stateRequests = new EnumMap<>(RobotState.class);
   private Map<RobotState, Trigger> stateTriggers = new EnumMap<>(RobotState.class);
 
-  @AutoLogOutput(key="Robot State/Current State")
+  @AutoLogOutput(key = "Robot State/Current State")
   private RobotState state = RobotState.IDLE;
 
-  @AutoLogOutput(key="Robot State/Previous State")
+  @AutoLogOutput(key = "Robot State/Previous State")
   private RobotState previousState = RobotState.IDLE;
 
   /** The container for the robot. Contains subsystems, OI devices, and commands. */
@@ -62,16 +72,30 @@ public class RobotContainer {
       case REAL:
         // Real robot, instantiate hardware IO implementations
         drive = new Drive(new DriveIOTalonSRX(), new GyroIOPigeon2());
+        shooter = new Shooter(new ShooterIOReal());
+        vision =
+            new Vision(
+                drive::addVisionMeasurement,
+                new VisionIO[] {new VisionIOPhotonVision("camera0", robotToCamera0)});
         break;
 
       case SIM:
         // Sim robot, instantiate physics sim IO implementations
         drive = new Drive(new DriveIOSim(), new GyroIO() {});
+        shooter = new Shooter(new ShooterIOSim());
+        vision =
+            new Vision(
+                drive::addVisionMeasurement,
+                new VisionIO[] {
+                  new VisionIOPhotonVisionSim("camera0", robotToCamera0, drive::getPose)
+                });
         break;
 
       default:
         // Replayed robot, disable IO implementations
         drive = new Drive(new DriveIO() {}, new GyroIO() {});
+        shooter = new Shooter(new ShooterIO() {});
+        vision = new Vision(drive::addVisionMeasurement, new VisionIO[] {});
         break;
     }
 
@@ -94,6 +118,7 @@ public class RobotContainer {
 
     // Configure the button bindings
     configureButtonBindings();
+    configureStates();
   }
 
   /**
@@ -103,20 +128,90 @@ public class RobotContainer {
    * edu.wpi.first.wpilibj2.command.button.JoystickButton}.
    */
   private void configureButtonBindings() {
-    // Default command, normal arcade drive
-    drive.setDefaultCommand(
-        DriveCommands.arcadeDrive(
-            drive, () -> -controller.getLeftY(), () -> -controller.getRightX()));
+    stateRequests.put(RobotState.IDLE, controller.y());
+    stateRequests.put(RobotState.INTAKE, controller.leftTrigger());
+    stateRequests.put(RobotState.PRESCORE, controller.rightBumper());
+    stateRequests.put(RobotState.SCORE, controller.rightTrigger());
+
+    for (RobotState state : RobotState.values()) {
+      stateTriggers.put(state, new Trigger(() -> this.state == state));
+    }
+  }
+
+  private void configureStates() {
+    // Transitions
+    stateTriggers
+        .get(RobotState.INTAKE)
+        .or(stateTriggers.get(RobotState.PRESCORE))
+        .and(stateRequests.get(RobotState.IDLE))
+        .onTrue(forceState(RobotState.IDLE));
+
+    stateTriggers
+        .get(RobotState.IDLE)
+        .and(stateRequests.get(RobotState.INTAKE))
+        .onTrue(forceState(RobotState.INTAKE));
+
+    stateTriggers
+        .get(RobotState.IDLE)
+        .or(stateTriggers.get(RobotState.INTAKE))
+        .and(stateRequests.get(RobotState.PRESCORE))
+        .onTrue(forceState(RobotState.PRESCORE));
+
+    stateTriggers
+        .get(RobotState.PRESCORE)
+        .and(stateRequests.get(RobotState.SCORE))
+        .onTrue(forceState(RobotState.SCORE));
+
+    stateTriggers
+        .get(RobotState.SCORE)
+        .and(stateRequests.get(RobotState.SCORE))
+        .onFalse(forceState(RobotState.PRESCORE));
+
+    // Normal arcade drive
+    stateTriggers
+        .get(RobotState.IDLE)
+        .or(stateTriggers.get(RobotState.INTAKE))
+        .onTrue(
+            Commands.parallel(
+                Commands.runOnce(shooter::stopFeed),
+                Commands.runOnce(shooter::stopShoot),
+                DriveCommands.arcadeDrive(
+                    drive, () -> -controller.getLeftY(), () -> -controller.getRightX())));
+
+    // Lock onto target
+    // Drive gets angle to target, shooter gets distance and height (delta x and delta y)
+    stateTriggers
+        .get(RobotState.PRESCORE)
+        .or(stateTriggers.get(RobotState.SCORE))
+        .onTrue(
+            Commands.parallel(
+                DriveCommands.driveAtAngle(
+                    drive,
+                    () -> -controller.getLeftY(),
+                    () ->
+                        targetFieldTranslation.minus(drive.getPose().getTranslation()).getAngle()),
+                Commands.run(
+                    () ->
+                        shooter.setTarget(
+                            new Translation2d(
+                                drive
+                                    .getPose()
+                                    .getTranslation()
+                                    .getDistance(targetFieldTranslation),
+                                targetZ)))));
+
+    stateTriggers.get(RobotState.PRESCORE).onTrue(Commands.runOnce(shooter::stopFeed));
+
+    stateTriggers.get(RobotState.SCORE).onTrue(Commands.runOnce(shooter::feed));
   }
 
   private Command forceState(RobotState nextState) {
     return Commands.runOnce(
-      () -> {
-        System.out.println("Changing state to " + nextState);
-        previousState = state;
-        state = nextState;
-      }
-    );
+        () -> {
+          System.out.println("Changing state to " + nextState);
+          previousState = state;
+          state = nextState;
+        });
   }
 
   /**
